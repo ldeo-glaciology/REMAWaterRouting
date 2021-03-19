@@ -1,3 +1,4 @@
+import math
 import numpy as np
 import sklearn.linear_model
 import skimage.morphology
@@ -11,10 +12,14 @@ from tqdm.autonotebook import tqdm
 import xarray as xr
 import os
 
+#for drainage_network
+import networkx as nx
+
+
 #read in the shapefiles of ice shelf grounding lines
-IS = gpd.read_file('IceShelf_Antarctica_v02/IceShelf_Antarctica_v02.shp') 
+IS = gpd.read_file('data/IceShelf_Antarctica_v02.shp') 
 #read in the REMA tile index
-REMA_index = gpd.read_file('REMA_Tile_Index/REMA_Tile_Index_Rel1_1.shp')
+REMA_index = gpd.read_file('data/REMA_Tile_Index_Rel1_1.shp')
 
 def download_REMA(shelf):
     #bounding box of ice shelf
@@ -57,8 +62,8 @@ def download_REMA(shelf):
     ds = xr.concat(dsets_rows, 'y', )
     ds_array = ds.squeeze()
     coarsed_masked_array = ds_array.coarsen(x=100,y=100).mean()
-    cellsize = ds_array.res[0]*100*ds_array.res[1]*100
-    sample = coarsed_masked_array.chunk((250,250))
+    cellsize = ds_array.res[0]
+    sample = coarsed_masked_array.chunk((cellsize*250,cellsize*250))
     return(sample)
 
 def flag_nans(dem):
@@ -91,7 +96,7 @@ def identifyflats(dem):
         flats[0:-1,[1, -1]]  = 0;
         flats[[0 -1],0:-1]  = 0;
 
-        flats = skimage.segmentation.clear_border(flats, buffer_size=2)
+        flats = skimage.segmentation.clear_border(flats, buffer_size=0)
 
        # if flag_nans==1:
         #    # remove flat pixels bordering to nans
@@ -275,6 +280,7 @@ def _get_new_candidate_cells(cell, unknown_cells):
 
 
 def _propagate_distance(cell, costs, wdt_field):
+    import math
     """
     Compute the weighted distance in a cell using costs and distances in other cells
     :param cell: tuple, index of a candidate cell
@@ -324,6 +330,163 @@ def _propagate_distance(cell, costs, wdt_field):
 
 
 def drainagebasins(Z,flats,sills,interiorbasins, cellsize):  
+    
+    Z_ravel = np.ravel(Z)
+    nrc = Z_ravel.shape[0]
+
+    Iobj  = flats
+    SILLS = sills
+    IntBasin = interiorbasins
+
+    # Here we choose the distance transform from outside the lakes to the inside and take the locations as sills where the distance is maximum.
+    DD = scipy.ndimage.distance_transform_edt(IntBasin);
+    MaxIntIX = [0,0] #added to prevent MaxIntIX does not exist errors
+    IntBasin_labels = skimage.measure.label(IntBasin)
+    for r in np.arange(0,np.max(IntBasin_labels)+1):
+        PixelIdxList = np.argwhere(IntBasin_labels==r)
+        ixm = np.argmax(DD[IntBasin_labels==r]);
+        MaxIntIX = PixelIdxList[ixm];
+
+        Iobj[PixelIdxList[0][0],PixelIdxList[0][1]] = 0;
+        SILLS[PixelIdxList[0][0],PixelIdxList[0][1]] = 1;
+    ixm = MaxIntIX;
+    Iobj[ixm[0],ixm[1]] = 0;
+    SILLS[ixm[0],ixm[1]] = 1;
+
+    # establish the connectivity between sills and flats
+    #dem = ZintoDB;
+    whereSILLS = np.argwhere(SILLS);
+    rows=[]
+    cols=[]
+    for rowcol in whereSILLS:    
+        [row,col] = rowcol
+        rows = np.append(rows,row)
+        cols = np.append(cols,col)
+
+    IXsill    = [rows,cols];
+    rowadd = [-1, -1, 0, 1, 1,  1,  0, -1];
+    coladd = [ 0,  1, 1, 1, 0, -1, -1, -1];
+    PreSillPixel = [0]
+    for r  in np.arange(0,8):
+        rowp = rows + rowadd[r];
+        colp = cols + coladd[r];
+
+        ValidRowColPair1 = np.bitwise_and(rowp>0, colp>0)
+        ValidRowColPair2 = np.bitwise_and(rowp<Z.shape[0], colp<Z.shape[1])
+        ValidRowColPair  = np.bitwise_and(ValidRowColPair1, ValidRowColPair2) 
+        whereValidRowColPair = np.where(ValidRowColPair)
+
+        IXPreSill = [rowp[whereValidRowColPair],colp[whereValidRowColPair]];
+        I1 = np.ravel_multi_index([np.int_(rows[whereValidRowColPair]), np.int_(cols[whereValidRowColPair])],Z.shape)
+        I2 = np.ravel_multi_index([np.int_(IXPreSill[0]),np.int_(IXPreSill[1])],Z.shape)
+        I3 = np.ravel_multi_index([np.int_(IXPreSill[0]),np.int_(IXPreSill[1])], Z.shape)
+        PreSillPixelCondition = (np.argwhere(np.bitwise_and((Z_ravel[I1] == 
+                    Z_ravel[I2]),
+                   Iobj.ravel()[I3])))        
+        if np.count_nonzero(PreSillPixelCondition)>0:
+               for i in  np.arange(0,len(PreSillPixelCondition)):
+                    PreSillPixelAddition = ([IXPreSill[0][PreSillPixelCondition[i]],IXPreSill[1][PreSillPixelCondition[i]]])
+                    PreSillPixel.append(PreSillPixelAddition)
+        else:
+            continue
+    PreSillPixel.pop(0);
+
+    #Iobj  = np.bitwise_not(Iobj)    
+    D = scipy.ndimage.distance_transform_edt(Iobj)
+    masked = np.inf * np.ones(Z.shape,D.dtype); 
+    masked[Iobj] = 0;
+    D[np.bitwise_not(Iobj)]=np.inf
+    D = ((skimage.morphology.reconstruction(seed = D+1,mask=masked,method='erosion'))- D) *cellsize
+    D = np.nan_to_num(D)  
+
+    D[~Iobj] = 1
+    #D = D**-1
+    cost_field  = map_image_to_costs(D**-1,PreSillPixel)
+    D = _wdt_python(cost_field) +1
+    D[~Iobj] = -np.inf
+
+    D = np.reshape(D.data,[1,D.shape[0]*D.shape[1]])
+    IXSortedFlats = np.argsort(D.ravel(),kind='mergesort');
+    #IXSortedFlats = IXSortedFlats[::-1]
+    #del D
+
+    ndx = np.arange(np.uint32(0),np.uint32(nrc));
+    ndx = ndx[IXSortedFlats];
+
+    ndx = np.arange(np.uint32(0),np.uint32(nrc));
+    ndx = ndx[IXSortedFlats];
+    del IXSortedFlats
+
+    ix = np.argsort(Z_ravel[ndx]);
+    ix = ix[::-1]
+    ix = ndx[ix]
+    #del ndx
+
+    # a fast solution that has quite much memory overhead...
+    pp = np.zeros(Z_ravel.shape,dtype=np.int32);
+    IX = np.arange(np.int32(0),np.int32(Z_ravel.shape));
+    pp[ix] = IX;
+    pp = pp.reshape(Z.shape)
+
+    # cardinal neighbors
+    IXC1 = skimage.morphology.dilation(pp, skimage.morphology.selem.diamond(1))
+    IXC1 = IXC1.ravel()
+    xxx1 = IXC1;
+    IX   = IXC1[ix];
+    IXC1 = ix[IX];
+
+    G1   = (Z_ravel[ix]-Z_ravel[IXC1])/(cellsize);
+    I4 = (np.argwhere(ix == IXC1)).ravel()
+
+    I4 = list(I4)
+    I4_test = np.zeros(G1.shape)
+    I4_test[I4] = -np.inf
+    G1 = G1 + I4_test;
+    #G1[ix == IXC1] = -np.inf;
+
+     # diagonal neighbors
+    kernel = np.array([[1,0,1],[0,1,0],[1,0,1]])
+    IXC2 = skimage.morphology.dilation(pp,kernel);
+    IXC2 = IXC2.ravel()
+    xxx2 = IXC2;
+    IX   = IXC2[ix];
+    IXC2 = ix[IX];
+    G2   = (Z_ravel[ix]-Z_ravel[IXC2])/np.linalg.norm([cellsize,cellsize]);
+
+
+    # choose the steeper one
+    #I  = np.bitwise_and(G1<=G2, xxx2[ix]>xxx1[ix]);
+    I  = dask.array.bitwise_and(dask.array.less_equal(G1,G2),xxx2[ix]>xxx1[ix])
+    ixc = IXC1;
+    ixc[I] = IXC2[I];
+
+    I = ixc == ix;
+    ix = ix[np.bitwise_not(I)];
+    ixc = ixc[np.bitwise_not(I)];
+    
+     # remove nans
+    I = np.isnan(Z_ravel);
+    ixc = ixc[~I[ix]];
+    ix = ix[~I[ix]];
+    
+    ix = np.int_(ix[~np.isnan(ix)])
+    ixc = np.int_(ixc[~np.isnan(ixc)])
+    
+    DBcounter = 0;
+    D = np.zeros(Z_ravel.shape[0],dtype=np.int32);
+    outlets=np.zeros((len(ix),1))
+    for r in np.arange(len(ix)-1,1,-1):
+        if D[ixc[r]] == 0:
+            DBcounter = DBcounter+1;
+            D[ixc[r]] = DBcounter;
+            outlets[DBcounter] = ixc[r];
+
+        D[ix[r]] = D[ixc[r]];
+
+    D = D.reshape(Z.shape)
+    return D
+
+def accumulation(Z,flats,sills,interiorbasins, cellsize):  
     
     #[Iobj,SILLS,IntBasin] = identifyflats(Z);
     Z = Z.data
@@ -474,6 +637,170 @@ def drainagebasins(Z,flats,sills,interiorbasins, cellsize):
     ix = np.int_(ix[~np.isnan(ix)])
     ixc = np.int_(ixc[~np.isnan(ixc)])
     
+    A = np.ones(Z.shape)
+    for r in np.arange(0,len(ix)):
+        [ixcx,ixcy] = np.unravel_index(ixc[r],Z.shape)
+        [ixx,ixy] = np.unravel_index(ix[r],Z.shape)
+        A[ixcx,ixcy] = A[ixx,ixy]+A[ixcx,ixcy];         
+    return A
+
+def stream_network(Z,flats,sills,interiorbasins, cellsize):  
+    
+    #[Iobj,SILLS,IntBasin] = identifyflats(Z);
+    Z = Z.data
+    Z_ravel = np.ravel(Z)
+    nrc = Z_ravel.shape[0]
+    
+    Iobj  = flats
+    SILLS = sills
+    IntBasin = interiorbasins
+
+    # Here we choose the distance transform from outside the lakes to the inside and take the locations as sills where the distance is maximum.
+    DD = scipy.ndimage.distance_transform_edt(np.bitwise_not(IntBasin));
+    MaxIntIX = [0,0] #added to prevent MaxIntIX does not exist errors
+    IntBasin_labels = skimage.measure.label(IntBasin)
+    for r in np.arange(1,np.max(IntBasin_labels)):
+        PixelIdxList = np.argwhere(IntBasin_labels==r)
+        ixm = np.argmax(DD[IntBasin_labels==r]);
+        MaxIntIX = PixelIdxList[ixm];
+
+        Iobj[PixelIdxList[0][0],PixelIdxList[0][1]] = 0;
+        SILLS[PixelIdxList[0][0],PixelIdxList[0][1]] = 1;
+    ixm = MaxIntIX;
+    Iobj[ixm[0],ixm[1]] = 0;
+    SILLS[ixm[0],ixm[1]] = 1;
+
+    # establish the connectivity between sills and flats
+    #dem = ZintoDB;
+    whereSILLS = np.argwhere(SILLS);
+    rows=[]
+    cols=[]
+    for rowcol in whereSILLS:    
+        [row,col] = rowcol
+        rows = np.append(rows,row)
+        cols = np.append(cols,col)
+
+    IXsill    = [rows,cols];
+    rowadd = [-1, -1, 0, 1, 1,  1,  0, -1];
+    coladd = [ 0,  1, 1, 1, 0, -1, -1, -1];
+    PreSillPixel = [0]
+    for r  in np.arange(0,8):
+        rowp = rows + rowadd[r];
+        colp = cols + coladd[r];
+
+        ValidRowColPair1 = np.bitwise_and(rowp>0, colp>0)
+        ValidRowColPair2 = np.bitwise_and(rowp<Z.shape[0], colp<Z.shape[1])
+        ValidRowColPair  = np.bitwise_and(ValidRowColPair1, ValidRowColPair2) 
+        whereValidRowColPair = np.where(ValidRowColPair)
+
+        IXPreSill = [rowp[whereValidRowColPair],colp[whereValidRowColPair]];
+        I1 = np.ravel_multi_index([np.int_(rows[whereValidRowColPair]), np.int_(cols[whereValidRowColPair])],Z.shape)
+        I2 = np.ravel_multi_index([np.int_(IXPreSill[0]),np.int_(IXPreSill[1])],Z.shape)
+        I3 = np.ravel_multi_index([np.int_(IXPreSill[0]),np.int_(IXPreSill[1])], Z.shape)
+        #PreSillPixelCondition = (np.argwhere(np.bitwise_and((Z_ravel[I1] == 
+         #           Z_ravel[I2]),
+         #          Iobj.ravel()[I3]))         
+         #   if np.count_nonzero(PreSillPixelCondition)>0:
+         #       for i in  np.arange(0,len(PreSillPixelCondition)):
+         #           PreSillPixelAddition = ([IXPreSill[0][PreSillPixelCondition[i]],IXPreSill[1][PreSillPixelCondition[i]]])
+         #           PreSillPixel.append(PreSillPixelAddition)
+         #   else:
+         #       continue
+    PreSillPixel.pop(0);
+        
+
+    Iobj  = np.bitwise_not(Iobj)    
+    D = scipy.ndimage.distance_transform_edt(Iobj)
+    masked = np.inf * np.ones(Z.shape,D.dtype); 
+    masked[Iobj] = 0;
+    D[np.bitwise_not(Iobj)]=np.inf
+    D = ((skimage.morphology.reconstruction(seed = D+1,mask=masked,method='erosion'))- D) *cellsize
+    D = np.nan_to_num(D)   
+
+    D[Iobj] = 0
+    #D = D**-1
+    cost_field  = map_image_to_costs(D**-1,PreSillPixel)
+    D = _wdt_python(cost_field) +1
+    D[Iobj] = -np.inf
+    
+    #del PreSillPixel
+    V = np.reshape(D.data,[1,D.shape[0]*D.shape[1]])
+    if np.any(np.isnan(np.diff(D.ravel()))):
+        IXSortedFlats = np.arange(0,len(Z_ravel))
+        IXSortedFlats = IXSortedFlats[::-1]
+    else:
+        IXSortedFlats = np.argsort(D.ravel());
+        IXSortedFlats = IXSortedFlats[::-1]
+    #del D
+
+    ndx = np.arange(np.uint32(0),np.uint32(nrc));
+    ndx = ndx[IXSortedFlats];
+    
+    ndx = np.arange(np.uint32(0),np.uint32(nrc));
+    ndx = ndx[IXSortedFlats];
+    del IXSortedFlats
+
+    ix = np.argsort(Z_ravel[ndx]);
+    ix = ix[::-1]
+    ix = ndx[ix]
+    del ndx
+
+     # a fast solution that has quite much memory overhead...
+    pp = np.zeros(Z_ravel.shape,dtype=np.int32);
+    IX = np.arange(np.int32(0),np.int32(Z_ravel.shape));
+    pp[ix] = IX;
+    pp = pp.reshape(Z.shape)
+    
+    # cardinal neighbors
+    IXC1 = skimage.morphology.dilation(pp, skimage.morphology.selem.diamond(1))
+    IXC1 = IXC1.ravel()
+    xxx1 = IXC1;
+    IX   = IXC1[ix];
+    IXC1 = ix[IX];
+    
+    G1   = (Z_ravel[ix]-Z_ravel[IXC1])/(cellsize);
+    I4 = (np.argwhere(ix == IXC1)).ravel()
+
+    I4 = list(I4)
+    I4_test = np.zeros(G1.shape)
+    I4_test[I4] = -np.inf
+    G1 = G1 + I4_test;
+    #G1[ix == IXC1] = -np.inf;
+
+     # diagonal neighbors
+    kernel = np.array([[1,0,1],[0,1,0],[1,0,1]])
+    IXC2 = skimage.morphology.dilation(pp,kernel);
+    IXC2 = IXC2.ravel()
+    xxx2 = IXC2;
+    IX   = IXC2[ix];
+    IXC2 = ix[IX];
+    G2   = (Z_ravel[ix]-Z_ravel[IXC2])/np.linalg.norm([cellsize,cellsize]);
+
+
+    # choose the steeper one
+    #I  = np.bitwise_and(G1<=G2, xxx2[ix]>xxx1[ix]);
+    I  = dask.array.bitwise_and(dask.array.less_equal(G1,G2),xxx2[ix]>xxx1[ix])
+    ixc = IXC1;
+    ixc[I] = IXC2[I];
+
+    I = ixc == ix;
+    ix = ix[np.bitwise_not(I)];
+    ixc = ixc[np.bitwise_not(I)];
+
+    # remove nans
+    I = np.isnan(Z_ravel);
+    ixc = ixc[~I[ix]];
+    ix = ix[~I[ix]];
+    
+    ix = np.int_(ix[~np.isnan(ix)])
+    ixc = np.int_(ixc[~np.isnan(ixc)])
+    
+    A = np.ones(Z.shape)
+    for r in np.arange(0,len(ix)):
+        [ixcx,ixcy] = np.unravel_index(ixc[r],Z.shape)
+        [ixx,ixy] = np.unravel_index(ix[r],Z.shape)
+        A[ixcx,ixcy] = A[ixx,ixy]+A[ixcx,ixcy]; 
+        
     DBcounter = 0;
     D = np.zeros(Z_ravel.shape[0],dtype=np.int32);
     outlets=np.zeros((len(ix),1))
@@ -486,46 +813,165 @@ def drainagebasins(Z,flats,sills,interiorbasins, cellsize):
         D[ix[r]] = D[ixc[r]];
 
     D = D.reshape(Z.shape)
-    return D
+    
+    minarea = 1000
+    W = np.bitwise_and(np.bool_(D>0),np.bool_(A>minarea));
+    Z = np.zeros(W.shape);
+    [ixx,ixy] = np.unravel_index(ix,Z.shape)
+    Z[ixx,ixy]  = W[ixx,ixy];
+    I = np.argwhere(Z[ixx,ixy]);
+    [ixcx,ixcy] = np.unravel_index(ix,Z.shape)
+    Z[ixcx[I],ixcy[I]] = W[ixcx[I],ixcy[I]];
+    W = Z*cellsize;
+    
+    return W
 
-def cleandrainagebasins(D):
+def cleandrainagebasins(D, x, y, interiorbasins):   
+    #Cumulative sum gives the index of these in the intrinsic
+    chunks_x = np.cumsum(interiorbasins.chunks[0])
+    chunks_y = np.cumsum(interiorbasins.chunks[1])
+
+    chunks_x = chunks_x[chunks_x<DB.shape[0]]
+    chunks_y = chunks_y[chunks_y<DB.shape[1]]
+    
     D_labelled = skimage.morphology.label(D)
 
     D_labelled_new = D
 
     #merge down
-    for i in np.arange(25,D.shape[0]-1,25):
-        topside = D[i-1,:]
+    for i in chunks_x:
+        topside = D[int(np.argwhere(x==i)),:]
         topside_values = np.argwhere(np.diff(topside)!=0)
         for ii in np.arange(0,len(topside_values)):
             col_to_merge = topside_values[ii]
             basin_to_merge = D_labelled[i,col_to_merge]
-            mask_right = np.argwhere(D_labelled == basin_to_merge)
-            [mask_x,mask_y] = np.array(mask_right).T
-            D_labelled_new[mask_x,mask_y] = D[i-1,topside_values[ii]]
+            #mask_right = np.argwhere(D_labelled == basin_to_merge)
+            #[mask_x,mask_y] = np.array(mask_right).T
+            D_labelled_new[D_labelled == basin_to_merge] = D[int(np.argwhere(x==i-1).squeeze()),topside_values[ii]]
 
     #Merge left
-    for i in np.arange(25,D.shape[1],25):
-        leftside = D_labelled[:,i-1]
+    for i in chunks_y:
+        leftside = D_labelled[:,int(np.argwhere(y==i-1).squeeze())]
         leftside_values = np.argwhere(np.diff(leftside)!=0)
         for ii in np.arange(0,len(leftside_values)):
             row_to_merge = leftside_values[ii]
             basin_to_merge = D_labelled[row_to_merge,i]
-            D_labelled_new[D_labelled == basin_to_merge] = D[leftside_values[ii],i-1]
-
-    xarray_D = xr.DataArray(data = D_labelled_new, coords = sample.coords,dims = sample.dims, attrs = sample.attrs)
-    return xarray_D
+            D_labelled_new[D_labelled == basin_to_merge] = D[leftside_values[ii],int(np.argwhere(y==i-1).squeeze())]
+    
+    #cleaned_DB = skimage.morphology.label(D_labelled_new)
+    return D_labelled_new
 
 def Inan(dem):
     Inan = np.isnan(dem)
     return Inan
 
-def filledbasins(dem,Inans):
+def dem_nonans(dem):
+    dem_nonans = dem
+    aretherenans = dask.array.any(dask.array.isnan(dem))
+    if aretherenans:
+        dem_nonans = np.nan_to_num(dem, -9999)
+    else:
+        dem_nonans = dem
+    return dem_nonans
+
+def markers(dem):
+    aretherenans = dask.array.any(dask.array.isnan(dem))
     marker = np.negative(dem);
-    #dem = dem + np.multiply(Inans,-np.inf)
     II = np.zeros(dem.shape);
     II[1:-1,1:-1] = 1;
-    mask = np.int_(np.bitwise_and(np.bool_(II),np.bitwise_not(np.bool_(Inans))))*-np.inf
-    marker = marker+mask;
-    demfs = -skimage.morphology.reconstruction(marker,-dem, method='dilation')
+    II = np.bool_(II)
+    #mask = np.zeros(dem.shape)
+    if aretherenans:
+        Inans  = np.isnan(dem)
+        marker[np.bitwise_and(II,~Inans)] = -np.inf
+    else:
+        marker[II] = -np.inf
+    #marker = marker+mask;
+    return marker
+
+def filledbasins(dem):
+    dem = dem_nonans(dem)
+    marker = markers(dem)
+    demfs = -skimage.morphology.reconstruction(marker,np.negative(dem), method='dilation')
     return demfs
+
+def remove_small_holes(dem):
+    dem = dem_nonans(dem)
+    marker = markers(dem)
+    demfs = -skimage.morphology.reconstruction(marker,np.negative(dem), method='dilation')
+    P_all = demfs - dem
+    dem_fixed = np.multiply(demfs,P_all<0.01)+np.multiply(dem,P_all>0.01)
+    #dem_fixed[P_all<0.01] = demfs[P_all<0.01]
+    return dem_fixed
+
+def drainage_network(DB,Z):
+    basin_connection = {}
+    for catchment in np.arange(DB_example_.min(),DB_example_.max()):
+            Mask = DB_example_==catchment
+            Masked = Z_dask*Mask
+            Masked_filled = Masked.map_overlap(hf.filledbasins, depth=2, dtype=float)
+
+            lowest = Masked_filled == Masked_filled[Masked_filled>0].min()
+            edges = skimage.morphology.dilation(skimage.segmentation.find_boundaries(Mask,mode='inner'))
+
+            lowest_edge = skimage.morphology.dilation((lowest.compute() & edges),selem=np.ones((2,2)))
+
+            edge_value = DB_example_[lowest_edge]!=catchment
+            edge_basin = DB_example_[lowest_edge][edge_value]
+            if len(edge_basin)>=1:
+                basin_connection[catchment]   = edge_basin[0]
+            else:
+                basin_connection[catchment] = 0
+
+    G=nx.from_edgelist(basin_connection.items())
+    return G
+
+
+def image_destriping(array, vel_array):
+    #from Destriping_functions import Lloyd_destripe, Guan_destripe, Rogass_destripe,\
+    #Pande_Chhetri_destripe, Pystripe_destripe, RMSE_metric, SSIM_metric, PSNR_metric
+    #from Oblique_destriping_functions import striping_angle, grad_image,\
+    #super_Gauss_filter, refinement_destriping
+    
+        
+    #Use a Frangi filter to identify any linear features, then create a label array to "blobbify" them 
+    labelled = skimage.morphology.label(skimage.filters.frangi(array)>0.00001)
+    #Calculate the orientation, find any larger than 500 pixels, return rounded CW angle
+    stats = skimage.measure.regionprops_table(labelled, properties={'label', 'area','orientation','major_axis_length'})
+    index = np.argwhere(stats['area']>500)
+    stripe_orientations = np.round(-(stats['orientation'][index]),2)
+    #Identify linear features that are aligned to ice flow +-0.1 rads = 5.7 deg 
+    is_flow_stripe = np.abs(stripe_orientations - np.single(np.round(vel_array.mean(),2)))<0.1
+    #Find the orientation of artifact stripes
+    theta = np.rad2deg(np.median(stripe_orientations[~is_flow_stripe]))
+    #Apply a rotated Fourier filter
+    Ly_i = np.shape(array)[0]
+    Lx_i = np.shape(array)[1]
+
+    N_pad = 1000
+    padded_patch = np.zeros((Ly_i+2*N_pad,Lx_i+2*N_pad))
+    padded_patch[N_pad:N_pad+Ly_i,N_pad:N_pad+Lx_i] = np.array(array)
+
+    Ly_p = Ly_i + 2*N_pad
+    Lx_p = Lx_i + 2*N_pad
+
+    M_forward = cv2.getRotationMatrix2D((Lx_p/2,Ly_p/2),theta,1)
+    array_rot = cv2.warpAffine(padded_patch,M_forward,(Lx_p,Ly_p))
+
+    padded_array_rot = np.copy(array_rot)
+    padded_array_rot[array_rot==0] = np.mean(array.data[array.data>0])
+    M_backward = cv2.getRotationMatrix2D((Lx_p/2,Ly_p/2),-theta,1)
+    # refine guess of stripe contribution to image
+    Lloyd_destriped = Lloyd_destripe(padded_array_rot,0.5*Lx_p,140)
+    destriped_array_ref = refinement_destriping(array_rot,Lloyd_destriped)
+
+    destriped_array_unrot = cv2.warpAffine(destriped_array_ref ,M_backward,\
+                                           (Lx_p,Ly_p))
+
+    destriped_image = destriped_array_unrot[N_pad:N_pad+Ly_i,N_pad:N_pad+Lx_i]
+    
+    #Apply a final gaussian filter
+    destriped_image = skimage.filters.gaussian(destriped_image,2)
+    destriped_image_xr = xr.DataArray(destriped_image,coords = array.coords)
+
+    return destriped_image_xr
