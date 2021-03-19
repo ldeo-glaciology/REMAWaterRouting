@@ -12,14 +12,23 @@ from tqdm.autonotebook import tqdm
 import xarray as xr
 import os
 
+import cv2
+import gcsfs
+import json
+
+from Destriping_functions import Lloyd_destripe, Guan_destripe, Rogass_destripe,\
+Pande_Chhetri_destripe, Pystripe_destripe, RMSE_metric, SSIM_metric, PSNR_metric
+from Oblique_destriping_functions import striping_angle, grad_image,\
+super_Gauss_filter, refinement_destriping
+
 #for drainage_network
 import networkx as nx
 
 
 #read in the shapefiles of ice shelf grounding lines
-IS = gpd.read_file('data/IceShelf_Antarctica_v02.shp') 
+IS = gpd.read_file('IceShelf_Antarctica_v02/IceShelf_Antarctica_v02.shp') 
 #read in the REMA tile index
-REMA_index = gpd.read_file('data/REMA_Tile_Index_Rel1_1.shp')
+REMA_index = gpd.read_file('REMA_Tile_Index/REMA_Tile_Index_Rel1_1.shp')
 
 def download_REMA(shelf):
     #bounding box of ice shelf
@@ -948,7 +957,7 @@ def image_destriping(array, vel_array):
     Ly_i = np.shape(array)[0]
     Lx_i = np.shape(array)[1]
 
-    N_pad = 1000
+    N_pad = 2000
     padded_patch = np.zeros((Ly_i+2*N_pad,Lx_i+2*N_pad))
     padded_patch[N_pad:N_pad+Ly_i,N_pad:N_pad+Lx_i] = np.array(array)
 
