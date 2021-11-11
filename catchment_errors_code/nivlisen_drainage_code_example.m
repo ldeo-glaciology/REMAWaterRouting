@@ -97,6 +97,7 @@ plotWhenReComputeBasins=1; % dicates if we plot the new catchment each time we c
 DEMfilled = 0;
 
 
+
 %% 2. Decrease resolution. 
 res=100;
 ii=1;
@@ -160,7 +161,7 @@ for i=1:max(is_nan_labelled(:))
     end
 end
 
-hs = partiallyFilled;%
+hs = elevateminima(partiallyFilled,2); %removes spurious 2-pixel depressions
 
 cellArea = res^2;
 DEMfilled = 0;
@@ -180,14 +181,14 @@ P_all_original = P_all;
 
 sec_in_day = 24*60*60;
 
-dt = 0.0005;      % days
+dt = 0.005;      % days
 
 [racmo_X,racmo_Y] = polarstereo_fwd(lat(:),lon(:));
 racmo_X = reshape(racmo_X, size(SM_mean_annual_sum));
 racmo_Y = reshape(racmo_Y, size(SM_mean_annual_sum));
 clip = (racmo_X>min(x) & racmo_X<max(x)) & (racmo_Y>min(y) & racmo_Y<max(y));
 mday_average = mean(SM_mean_mdays(clip));
-T = ceil(mday_average);     % days
+T = 3;%ceil(mday_average);     % days
 t = 0:dt:T;  % days
 
 %% Set up preliminary model timestteps
@@ -211,7 +212,7 @@ poi_y = 563;
 poi_x = 976;
 %% Initial flow routing
 
-FD = FLOWobj(hs,'preprocess','none','internaldrainage',false); % flow directions
+FD = FLOWobj(hs,'preprocess','none','internaldrainage',true); % flow directions
 
 
 DB = drainagebasins(FD);
@@ -311,7 +312,7 @@ catchment_maps = zeros(size(DB.Z,1),size(DB.Z,2),10*T);
  hs_original = hs;
  
  %%
-for ii =1:23%length(t)  % for each time step
+for ii =1:length(t)  % for each time step
 
     for jj = 2:length(b)  % for each basin
         
@@ -423,15 +424,14 @@ end
     
     hold on;
     imagesc(x,y,imoverlay(water,A.Z>1e7))
-
-%% Plot h of catchment over time
-
-figure(4);
-clf
-plot(VariableTable.tstep, VariableTable.h)
-xlabel('Time (day)')
-ylabel(strcat('h of catchement at (', num2str(poi_y),',',num2str(poi_x),')')); 
-%% Plot hs and changes in catchment outline    
+ %% Plot h of catchment over time
+% 
+% figure(4);
+% clf
+% plot(VariableTable.tstep, VariableTable.h)
+% xlabel('Time (day)')
+% ylabel(strcat('h of catchement at (', num2str(poi_y),',',num2str(poi_x),')')); 
+ %% Plot hs and changes in catchment outline    
 figure(5);
 clf
 imagesc(hs.Z);
@@ -453,22 +453,22 @@ caxis([min(hs.Z(logical(catchment_outline(:,:,21)))),max(hs.Z(logical(catchment_
 lgnd = legend('Point of Interest',num2str(VariableTable(21,'tstep').tstep),num2str(VariableTable(22,'tstep').tstep));
 lgnd.Title.String = 'Time Step';
     
- %% Step through catchment expansion
-% figure(21)
-% clf
-% for i=1:size(catchment_maps,3)
-%     imagesc(catchment_maps(:,:,i));
-%     hold on;
-%     B = bwboundaries((catchment_outline(:,:,i)));
-%     Bx= B{1}(:,1);
-%     By= B{1}(:,2);
-%     colormap(cool(20))
-%     caxis([0 1])
-%     colorbar
-%     plot(By,Bx,'r','LineWidth',3)
-%     scatter(poi_x,poi_y,'ks')
-%     title(strcat('Day:',num2str(i/(1/dt))))
-%     pause(.1)
-%     %"Click to advance another timestep"
-%     %waitforbuttonpress
-% end
+  %% Step through catchment expansion
+figure(21)
+clf
+for i=1:size(catchment_maps,3)
+    imagesc(catchment_maps(:,:,i));
+    hold on;
+    B = bwboundaries((catchment_outline(:,:,i)));
+    Bx= B{1}(:,1);
+    By= B{1}(:,2);
+    colormap(cool(20))
+    caxis([0 1])
+    colorbar
+    plot(By,Bx,'r','LineWidth',3)
+    scatter(poi_x,poi_y,'ks')
+    title(strcat('Day:',num2str(i/(1/dt))))
+    pause(.1)
+    %"Click to advance another timestep"
+    %waitforbuttonpress
+end

@@ -9,11 +9,13 @@ if ~any(P_all.Z(:)>0)
     return
 end
 
-FD = FLOWobj(hs,'preprocess','none','internaldrainage',false); % flow directions
+
+FD = FLOWobj(hs,'preprocess','none','internaldrainage',true); % flow directions
 % FD = FLOWobj(hs,'preprocess','none','verbose',true);                % flow directions
 
 
 A = flowacc(FD).*(FD.cellsize^2);  % flow accumulation
+
 S   = STREAMobj(FD,A>2e5);         % stream locations(places where flow accumulation is larger than some threshold
 DB = drainagebasins(FD);
 
