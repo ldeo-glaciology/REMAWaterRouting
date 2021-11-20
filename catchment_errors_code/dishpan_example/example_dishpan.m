@@ -1,7 +1,9 @@
 % A simple code to show the issue in drainage basin spliting
 % Here we define a simple topography: a round, shallow dishpan with two
 % semicircular bowl-shaped handles
-%cd dishpan_example/
+addpath dishpan_example/
+clear all
+addpath topotoolbox-2.2/
 
 dishpan = ones(100,100)*10;
 %central bowl
@@ -34,7 +36,7 @@ rim = bwmorph(~isnan(dishpan),'remove');
 dishpan(rim) = 10;
 
 %make topography bilaterally symmetric
-dishpan(51:end,:) = flipud(dishpan(1:50,:));
+dishpan(:,51:end) = fliplr(dishpan(:,1:50));
 
 %point added so Hypsometry_of_all_Basins works
 dishpan(1,1) = 1;
@@ -52,7 +54,7 @@ hs_original = hs;
 h_old = hs;
 cellArea = 1;
 Hypsometry_of_all_basins_js
-T = 1049;
+T = 382;
 dt = 1;
 t = 0:dt:T;  % days
 clf
@@ -60,7 +62,8 @@ surf(hs.Z)
 %% Melt input
 
 melt = zeros(size(hs.Z));
-melt(SE>0) = 0.32;
+melt(SE>0) =2* 792.2113/(3621*2);
+melt(51:end,:) = 0;
 m = zeros(1,length(b)+1);
 
 
@@ -79,7 +82,6 @@ m = zeros(1,length(b)+1);
 varTypes = {'double','double','double','double','double','double','double','double','double'};
 varNames = {'tstep','CatchmentNum','Area','Volume','h','WaterVolume','meltInput','MajorAxisLength','MinorAxisLength'};
 VariableTable = table('Size',sz,'VariableTypes',varTypes,'VariableNames',varNames);
-VariableTable2 = VariableTable;
    
 for ii =1:length(t)  % for each time step %477 = timestep when split first occurs
 
@@ -114,11 +116,9 @@ for ii =1:length(t)  % for each time step %477 = timestep when split first occur
     end
     %any([b.h]>=[b.maxdepth])
     %%
-       if rem(t(ii),1)==0 & t(ii)>0
-          %AddWaterDepthsTohs
-          water = hs.Z-hs_original.Z;
-          water_maps(:,:,uint8(t(ii))) = water;
-       end
+     
+     water = hs.Z-hs_original.Z;
+       
 
     % Catch if any basin is full
      if any([b.h]>=[b.maxdepth])
@@ -141,52 +141,46 @@ for ii =1:length(t)  % for each time step %477 = timestep when split first occur
             plotWhenReComputeBasins=1;
             
             Hypsometry_of_all_basins_js
+            if length(find([b.skip]<1))==1
+                reconnectdrainage
+                hs.Z(paths) = hs.Z(paths)-0.2;
+                Hypsometry_of_all_basins_js
+            end
+                        
+
             m = zeros(1,length(b));
 
               for kk = 2:length(BasinNumbers)
                Mask = DB == BasinNumbers(kk);
                m(kk)=  mean(melt(Mask.Z))/(T);
               end
-            end
-     
+    end
+
      
     
 
     disp([num2str(t(ii)) ' days'])
     
     %% record various characteristics of one catchment
-    
-    bnum = DB.Z(10,50);
-    VariableTable(ii,'CatchmentNum') = {bnum};
+    lake = water>0;
+    bnums = unique(DB.Z(lake));
+    %VariableTable(ii,'CatchmentNum') = {bnum};
     VariableTable(ii,'tstep') = {t(ii)};
-    VariableTable(ii,'Area') = {b(bnum+1).BasinArea};
+    VariableTable(ii,'Area') = {sum([b(bnums+1).BasinArea])};
     %if t(ii)>0 && VariableTable(ii,'Area').Area<VariableTable(ii-1,'Area').Area
      %   break
     %end
-    VariableTable(ii,'h') = {b(bnum+1).h};
-    VariableTable(ii,'Volume') =  {nansum(P_all_original.Z(DB.Z == bnum))*cellArea};
+    VariableTable(ii,'h') = {mean([b(bnums+1).h])};
+    Mask = zeros(DB.size);
+    for z = 1:length(bnums)
+        Mask = Mask + (DB.Z==bnums(z));
+    end
+    Mask = logical(Mask);
+    VariableTable(ii,'Volume') =  {nansum(P_all_original.Z(Mask)*cellArea)};
     waterVolume = P_all_original - P_all;
-    VariableTable(ii,'WaterVolume') = {nansum(waterVolume.Z(DB.Z == bnum))*cellArea};
-    VariableTable(ii,'meltInput') = {m(bnum+1)};
-    stats = regionprops(DB.Z == bnum,'MajorAxisLength','MinorAxisLength');
-    VariableTable(ii,'MajorAxisLength') = {stats.MajorAxisLength};
-    VariableTable(ii,'MinorAxisLength') = {stats.MinorAxisLength};
+    VariableTable(ii,'WaterVolume') = {nansum(waterVolume.Z(Mask)*cellArea)};
+    VariableTable(ii,'meltInput') = {mean([m(bnums+1)])};
+end
    
-   bnum = DB.Z(90,50);
-    VariableTable2(ii,'CatchmentNum') = {bnum};
-    VariableTable2(ii,'tstep') = {t(ii)};
-    VariableTable2(ii,'Area') = {b(bnum+1).BasinArea};
-    %if t(ii)>0 && VariableTable(ii,'Area').Area<VariableTable(ii-1,'Area').Area
-     %   break
-    %end
-    VariableTable2(ii,'h') = {b(bnum+1).h};
-    VariableTable2(ii,'Volume') =  {nansum(P_all_original.Z(DB.Z == bnum))*cellArea};
-    waterVolume = P_all_original - P_all;
-    VariableTable2(ii,'WaterVolume') = {nansum(waterVolume.Z(DB.Z == bnum))*cellArea};
-    VariableTable2(ii,'meltInput') = {m(bnum+1)};
-    stats = regionprops(DB.Z == bnum,'MajorAxisLength','MinorAxisLength');
-    VariableTable2(ii,'MajorAxisLength') = {stats.MajorAxisLength};
-    VariableTable2(ii,'MinorAxisLength') = {stats.MinorAxisLength};
-   
-end  
+
  
