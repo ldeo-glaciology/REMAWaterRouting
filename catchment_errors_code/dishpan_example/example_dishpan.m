@@ -5,6 +5,10 @@ addpath dishpan_example/
 clear all
 addpath topotoolbox-2.2/
 
+
+half = false; %set melt input to only one half of the dishpan
+reconnect = false; %run code to reconnect the drainage network in case of splitting
+
 dishpan = ones(100,100)*10;
 %central bowl
 SE = offsetstrel('ball',30,1).Offset;
@@ -26,9 +30,9 @@ dishpan = dishpan-SE-B;
 % dishpan = dishpan - noise;
 
 % erode topography
-dishpan = imerode(dishpan,ones(4));
+dishpan = imerode(dishpan,ones(6));
 
-% erase surrounding surface
+% erase surrounding surface 
 dishpan(dishpan==10) = nan;
 
 %add rim to dishpan to that water doesn't fall out
@@ -37,6 +41,12 @@ dishpan(rim) = 10;
 
 %make topography bilaterally symmetric
 dishpan(:,51:end) = fliplr(dishpan(:,1:50));
+
+%add exit path
+% dishpan(2:10, 47:53) = 9.2;
+% dishpan(2:10,47) = 10;
+% dishpan(2:10,53) = 10;
+% dishpan(4,50) = 0;
 
 %point added so Hypsometry_of_all_Basins works
 dishpan(1,1) = 1;
@@ -54,22 +64,27 @@ hs_original = hs;
 h_old = hs;
 cellArea = 1;
 Hypsometry_of_all_basins_js
-T = 382;
-dt = 1;
+T = 1000;
+dt = .2;
 t = 0:dt:T;  % days
 clf
 surf(hs.Z)
 %% Melt input
 
 melt = zeros(size(hs.Z));
-melt(SE>0) =2* 792.2113/(3621*2);
-melt(51:end,:) = 0;
+melt(SE>0) = 894.2900/(3112)/100;
+if half
+    %melt(51:end,:) = 0.5*melt(:,51:end);
+    melt(10,50) = 894.2900/(3112)/100;
+    melt(51:end,:) = 0;
+
+end
 m = zeros(1,length(b)+1);
 
 
     for kk = 2:length(BasinNumbers)
         Mask = DB == BasinNumbers(kk);
-        m(kk)=  mean(melt(Mask.Z))/(T);
+        m(kk)=  mean(melt(Mask.Z));
     end
  %%
 %We run the code up to the point where water is drained into the two handles. 
@@ -119,6 +134,7 @@ for ii =1:length(t)  % for each time step %477 = timestep when split first occur
      
      water = hs.Z-hs_original.Z;
        
+      if DEMfilled == 1; return; end
 
     % Catch if any basin is full
      if any([b.h]>=[b.maxdepth])
@@ -131,7 +147,7 @@ for ii =1:length(t)  % for each time step %477 = timestep when split first occur
             % add water to watermap
                water = hs.Z-hs_original.Z;
 
-            
+   
           
             for s=1:length(filledbasins)
                 disp(['Basin ', num2str(b(filledbasins(s)).BasinNumber),' has been filled'])
@@ -141,19 +157,36 @@ for ii =1:length(t)  % for each time step %477 = timestep when split first occur
             plotWhenReComputeBasins=1;
             
             Hypsometry_of_all_basins_js
-            if length(find([b.skip]<1))==1
-                reconnectdrainage
-                hs.Z(paths) = hs.Z(paths)-0.2;
-                Hypsometry_of_all_basins_js
+            
+            bnums = unique(DB.Z(P_all.Z>0));
+            Mask = zeros(DB.size);
+            for n=1:length(bnums)
+                Mask = Mask+ (DB.Z == bnums(n));
             end
-                        
+%             if reconnect ==true
+%                 if length(bnums)>2 && length(find([b(bnums).skip]<1))==1
+% 
+%                     reconnectdrainage
+%                     Hypsometry_of_all_basins_js
+%                     [DB, outlets] = drainagebasins(FD, S);
+%                     %hs = imposemin(FD,hs,0.005);
+%                     %hs.Z(paths) = hs.Z(paths)-linspace(0,.1,nnz(paths(:)))';
+% 
+%                 end
+%             end       
 
             m = zeros(1,length(b));
 
               for kk = 2:length(BasinNumbers)
                Mask = DB == BasinNumbers(kk);
-               m(kk)=  mean(melt(Mask.Z))/(T);
+               m(kk)=  mean(melt(Mask.Z));
               end
+              if any([b.skip])
+                  if reconnect==true
+                   meltredistribution
+                   m = m_new;
+                  end
+               end
     end
 
      
