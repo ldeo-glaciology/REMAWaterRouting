@@ -6,8 +6,8 @@ clear all
 addpath topotoolbox-2.2/
 
 
-half = false; %set melt input to only one half of the dishpan
-reconnect = false; %run code to reconnect the drainage network in case of splitting
+half = true; %set melt input to only one half of the dishpan
+reconnect = true; %run code to reconnect the drainage network in case of splitting
 
 dishpan = ones(100,100)*10;
 %central bowl
@@ -15,6 +15,7 @@ SE = offsetstrel('ball',30,1).Offset;
 SE(isinf(SE)) = 0;
 SE = padarray(SE,[22,22]);
 SE = SE(2:end,2:end);
+
 %handles (called ears)
 ears = offsetstrel('ball',9,1.5).Offset;
 B = zeros(100,100);
@@ -30,7 +31,7 @@ dishpan = dishpan-SE-B;
 % dishpan = dishpan - noise;
 
 % erode topography
-dishpan = imerode(dishpan,ones(6));
+dishpan = imerode(dishpan,ones(4));
 
 % erase surrounding surface 
 dishpan(dishpan==10) = nan;
@@ -64,18 +65,23 @@ hs_original = hs;
 h_old = hs;
 cellArea = 1;
 Hypsometry_of_all_basins_js
+labelled_lakes = [];
 T = 1000;
-dt = .2;
+dt = .01;
 t = 0:dt:T;  % days
 clf
-surf(hs.Z)
+subplot(1,2,1); surf(hs.Z)
+subplot(1,2,2); imagesc(DB.Z)
+
 %% Melt input
 
 melt = zeros(size(hs.Z));
 melt(SE>0) = 894.2900/(3112)/100;
+melt(1:26,:) = 0;
+melt(74:end,:) = 0;
 if half
     %melt(51:end,:) = 0.5*melt(:,51:end);
-    melt(10,50) = 894.2900/(3112)/100;
+    %melt(10,50) = 894.2900/(3112)/100;
     melt(51:end,:) = 0;
 
 end
@@ -86,9 +92,10 @@ m = zeros(1,length(b)+1);
         Mask = DB == BasinNumbers(kk);
         m(kk)=  mean(melt(Mask.Z));
     end
+    
+    m_old = m;
  %%
 %We run the code up to the point where water is drained into the two handles. 
-% Due to random noise, the division is determined somewhat randomly   
    P_all_original =P_all;
    summer_count = 1;
    DEMfilled = 0;
@@ -98,7 +105,7 @@ varTypes = {'double','double','double','double','double','double','double','doub
 varNames = {'tstep','CatchmentNum','Area','Volume','h','WaterVolume','meltInput','MajorAxisLength','MinorAxisLength'};
 VariableTable = table('Size',sz,'VariableTypes',varTypes,'VariableNames',varNames);
    
-for ii =1:length(t)  % for each time step %477 = timestep when split first occurs
+for ii =1:length(t)  % for each time step %656 = timestep before when split first occurs
 
     for jj = 2:length(b)  % for each basin
         
@@ -132,7 +139,6 @@ for ii =1:length(t)  % for each time step %477 = timestep when split first occur
     %any([b.h]>=[b.maxdepth])
     %%
      
-     water = hs.Z-hs_original.Z;
        
       if DEMfilled == 1; return; end
 
@@ -146,7 +152,7 @@ for ii =1:length(t)  % for each time step %477 = timestep when split first occur
             AddWaterDepthsTohs
             % add water to watermap
                water = hs.Z-hs_original.Z;
-
+               labelled_lakes = bwlabel(water>0);
    
           
             for s=1:length(filledbasins)
@@ -158,11 +164,6 @@ for ii =1:length(t)  % for each time step %477 = timestep when split first occur
             
             Hypsometry_of_all_basins_js
             
-            bnums = unique(DB.Z(P_all.Z>0));
-            Mask = zeros(DB.size);
-            for n=1:length(bnums)
-                Mask = Mask+ (DB.Z == bnums(n));
-            end
 %             if reconnect ==true
 %                 if length(bnums)>2 && length(find([b(bnums).skip]<1))==1
 % 
@@ -176,27 +177,39 @@ for ii =1:length(t)  % for each time step %477 = timestep when split first occur
 %             end       
 
             m = zeros(1,length(b));
-
+            meltinput_map = zeros(DB.size);
               for kk = 2:length(BasinNumbers)
-               Mask = DB == BasinNumbers(kk);
-               m(kk)=  mean(melt(Mask.Z));
+               Mask = DB.Z == BasinNumbers(kk);
+               m(kk)=  mean(melt(Mask));
+               meltinput_map(Mask) = mean(melt(Mask));
               end
-              if any([b.skip])
-                  if reconnect==true
-                   meltredistribution
-                   m = m_new;
+              
+
+              
+              
+              for lk=1:max(labelled_lakes(:))
+                  Mask = labelled_lakes == lk;
+                  if length(unique(meltinput_map(Mask)))>1
+                      if reconnect==true
+                       bnums = unique(DB.Z(Mask));
+                       
+                       redistributeMeltinLake
+                       %m = m_new;
+                      end
                   end
                end
+              
     end
 
      
     
 
     disp([num2str(t(ii)) ' days'])
-    
-    %% record various characteristics of one catchment
-    lake = water>0;
-    bnums = unique(DB.Z(lake));
+    if ~isempty(labelled_lakes)
+    % record various characteristics of one water body
+    lake = labelled_lakes(50,50);
+    lake_mask = imdilate(labelled_lakes == lake,ones(3));
+    bnums = unique(DB.Z(lake_mask));
     %VariableTable(ii,'CatchmentNum') = {bnum};
     VariableTable(ii,'tstep') = {t(ii)};
     VariableTable(ii,'Area') = {sum([b(bnums+1).BasinArea])};
@@ -212,7 +225,8 @@ for ii =1:length(t)  % for each time step %477 = timestep when split first occur
     VariableTable(ii,'Volume') =  {nansum(P_all_original.Z(Mask)*cellArea)};
     waterVolume = P_all_original - P_all;
     VariableTable(ii,'WaterVolume') = {nansum(waterVolume.Z(Mask)*cellArea)};
-    VariableTable(ii,'meltInput') = {mean([m(bnums+1)])};
+    VariableTable(ii,'meltInput') = {nansum([m(bnums+1)])};
+    end
 end
    
 
